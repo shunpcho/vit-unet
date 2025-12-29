@@ -1,0 +1,16 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.mypy_cache/
+*.py[cod]
+
+# Project directories
+/.venv
+/dist
+/logs
+/data
+/result*
+/.python-version
+# File(s) created by meas.
+Errlog*
+# VSCode
+/.vscode

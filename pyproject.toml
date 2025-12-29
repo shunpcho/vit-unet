@@ -1,7 +1,86 @@
 [project]
 name = "vit-unet"
 version = "0.1.0"
-description = "Add your description here"
+description = "ViT-based autoencoders via a UNet-type architecture."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+[tools.uv.build-backends]
+module-name = "vit_unet"
+module-root = "src"
+
+[tool.ruff]
+line-length = 120
+exclude = [
+    "__pycache__",
+    ".venv",
+    ".git",
+    ".github",
+    ".idea",
+    "*.pyc",
+    "*.pyo",
+    "*.pyd",
+    "*_pb2.py",
+    "*_pb2_grpc.py",
+]
+
+[tool.ruff.lint]
+preview = true
+select = ["ALL"]
+ignore = [
+    "COM812",  # Rule checking for missing trailing comma. The formatter enforces consistent use of trailing commas, making this rule redundant.
+    "CPY",     # Rule checking for missing copyright. In general copyright notices are probably not needed, if they are, then remove this line.
+    "D1",      # Rules checking for missing docstrings. Very often some modules/classes/functions are trivial, so there is no need to document them.
+    "DOC201",  # Rule checking for missing "Returns:" section in docstring. For short and simple functions, having a Returns section creates unnecessary verbosity.
+    "D203",    # one-blank-line-before-class (incompatible with D211)
+    "D213",    # multi-line-summary-second-line (incompatible with D212)
+    "DTZ005",  # Timezone stuff
+    "ERA001",  # Found commented-out code
+    "FBT001",  # Rule checking for mutable default arguments. In many cases, using mutable default arguments is perfectly fine, so this rule is ignored to reduce noise.
+    "FBT002",  # Rule checking for mutable module-level variables. In many cases, using mutable module-level variables is perfectly fine, so this rule is ignored to reduce noise.
+    "FBT003",  # Boolean positional value in function call
+    "FIX",     # Rule checking for TODO, FIXME, etc... These are not always meant to be resolved straightaway, hence ignoring these rules.
+    "G004",    # Rule checking for uses of f-strings to format logging messages. In general we do not have complex logging setups, nor do we really care about any potential time savings. Hence the choice to prioritize the readability and user friendliness of f-strings over proper logging practices.
+    "ISC001",  # conflict with formatter
+    "PLW2901", # loop variable overwritten by assignment target
+    "RET504",  # Rule checking for unnecessary assignment before `return` statement. Ignored in favor of better readability.
+    "RET505",  # Rule checking for unnecessary `else` after `return` statement. Ignored in favor of better readability.
+    "RET508",  # Rule checking for unnecessary `elif` after `break` statement. Ignored in favor of better readability.
+    "S",       # Rules related to security. They are not relevant for most projects.
+    "TD001",   # Rule checking that only "TODO" is used (No FIXME, etc...). Does not provide any benefit imho.
+    "TD002",   # Rule checking that a TODO comment includes an author. I've never used this, nor have I seen it in a project so far.
+    "TD003",   # Rule checking for missing issue link in a TODO. There is rarely an issue associated with a TODO.
+    "T201",    # Rule checking for print statements. Print statement are often used in smaller projects or during debugging, remove this line for production code.
+]
+
+[tool.ruff.lint.pylint]
+max-args = 10
+max-statements = 60
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["PLR2004", "S101"]
+"scripts/**/*.py" = ["INP001"]
+
+[tool.ruff.lint.isort]
+order-by-type = false
+known-first-party = ["denoiser"]
+
+[tool.ruff.lint.flake8-quotes]
+docstring-quotes = "double"
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.pyright]
+pythonVersion = "3.11"
+pythonPlatform = "Linux"
+typeCheckingMode = "strict"
+reportUnnecessaryComparison = "warning"
+reportUnnecessaryTypeIgnoreComment = "warning"
+reportUnknownMemberType = false
+reportMissingTypeStubs = false
