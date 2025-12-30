@@ -4,15 +4,18 @@ version = "0.1.0"
 description = "ViT-based autoencoders via a UNet-type architecture."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["scikit-image>=0.26.0", "torch>=2.9.1", "torchvision>=0.24.1"]
+
+[dependency-groups]
+dev = ["ipython>=9.8.0", "pyright>=1.1.407", "ruff>=0.14.10"]
 
 [build-system]
-requires = ["uv_build"]
+requires = ["uv_build<=0.9.13"]
 build-backend = "uv_build"
 
-[tools.uv.build-backends]
+[tool.uv.build-backend]
 module-name = "vit_unet"
-module-root = "src"
+module-root = "src/vit_unet/models"
 
 [tool.ruff]
 line-length = 120
@@ -68,7 +71,7 @@ max-statements = 60
 
 [tool.ruff.lint.isort]
 order-by-type = false
-known-first-party = ["denoiser"]
+known-first-party = ["vit_unet"]
 
 [tool.ruff.lint.flake8-quotes]
 docstring-quotes = "double"
