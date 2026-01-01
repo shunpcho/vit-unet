@@ -3,10 +3,8 @@ from pathlib import Path
 from typing import TypedDict
 
 import cv2
-import nibabel as nib
 import numpy as np
 import numpy.typing as npt
-import pydicom
 import torch
 from benatools.torch.fitter import TorchFitterBase
 
@@ -16,42 +14,11 @@ class DatasetInfo(TypedDict):
     y: npt.NDArray[np.float32]
 
 
-class SegmentationDataset(torch.utils.data.Dataset):
-    def __init__(self, df, augments=None, is_test=False, data_folder="output", im_size=(128, 128), ls=0.0):
-        self.df = df
-        self.augments = augments
-        self.is_test = is_test
-        self.data_folder = data_folder
-        self.im_size = im_size
-        self.ls = ls
-
-    def __getitem__(self, idx):
-        row = self.df.loc[idx]
-        path_image = row["image"]
-        path_mask = row["mask"]
-        mask_index = row["mask_index"]
-
-        # Image
-        x = pydicom.read_file(path_image).pixel_array
-
-        # Mask
-        nii_img = nib.load(path_mask)
-        nii_data = nii_img.get_fdata()
-        mask = nii_data[:, :, mask_index]
-
-        # Augmentation including scaling
-        if self.augments:
-            augmented = self.augments(image=x, mask=mask)
-            x = augmented["image"]
-            mask = augmented["mask"]
-
-        return {"x": x, "y": mask}
-
-    def __len__(self):
-        return len(self.df)
-
-
-class DenoisingDataset(torch.utils.data.Dataset):
+class DenoisingDataset(
+    torch.utils.data.Dataset[
+        tuple[npt.NDArray[np.uint8] | npt.NDArray[np.float32], npt.NDArray[np.uint8] | npt.NDArray[np.float32]]
+    ]
+):
     def __init__(
         self,
         img_names: Iterable[str],
@@ -59,7 +26,7 @@ class DenoisingDataset(torch.utils.data.Dataset):
         clean_folder: str = "/ssid/clean/",
         noisy_folder: str = "/ssid/noisy/",
         im_size: int | tuple[int, int] = 224,
-    ):
+    ) -> None:
         self.img_names = [Path(img_name) for img_name in img_names]
         self.augments = augments
         self.clean_folder = clean_folder
@@ -68,7 +35,7 @@ class DenoisingDataset(torch.utils.data.Dataset):
             im_size = (im_size, im_size)
         self.im_size = im_size
 
-    def __getitem__(self, idx: int) -> dict[str, npt.NDArray[np.float32]]:
+    def __getitem__(self, idx: int) -> DatasetInfo:
         img_clean = cv2.imread(self.img_names[idx].as_posix().replace("real", "mean"))
         img_noisy = cv2.imread(self.img_names[idx])
 
@@ -89,7 +56,7 @@ class DenoisingDataset(torch.utils.data.Dataset):
         dataset_info = DatasetInfo(x=img_noisy, y=img_clean)
         return dataset_info
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.img_names)
 
 

@@ -9,7 +9,7 @@ import fire
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from skimage.metrics import peak_signal_noise_ratio
+from skimage.metrics import peak_signal_noise_ratio  # pyright: ignore[reportUnknownVariableType]
 from sklearn.model_selection import KFold
 
 import vit_unet.models.functions as fn
@@ -20,11 +20,11 @@ from vit_unet.models.build_model import get_vit_unet
 
 def train(
     input_folder: str = "/home/s.chochi/ai-works/denoiser/data/CC15",
-    n_epochs: int = 80,
+    n_epochs: int = 50,
     folds: int = 3,
     model_string: Literal["lite", "base", "large"] = "lite",
     lr: float = 1e-5,
-    batch_size: int = 8,
+    batch_size: int = 4,
     im_size: int | tuple[int, int] = 256,
 ):
     torch.random.manual_seed(42)
