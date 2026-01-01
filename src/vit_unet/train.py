@@ -20,11 +20,11 @@ from vit_unet.models.build_model import get_vit_unet
 
 def train(
     input_folder: str = "/home/s.chochi/ai-works/denoiser/data/CC15",
-    n_epochs: int = 30,
+    n_epochs: int = 80,
     folds: int = 3,
     model_string: Literal["lite", "base", "large"] = "lite",
-    lr: float = 1e-6,
-    batch_size: int = 4,
+    lr: float = 1e-5,
+    batch_size: int = 8,
     im_size: int | tuple[int, int] = 256,
 ):
     torch.random.manual_seed(42)
@@ -91,7 +91,10 @@ def train(
             model = get_vit_unet(model_string)
             model.to(device)
             criterion = torch.nn.MSELoss()
-            optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+            optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+
+            # Add learning rate scheduler for stability
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=lr / 10)
 
             # Create fitter
             fitter = dataset.ImageFitter(
@@ -102,6 +105,8 @@ def train(
                 data_log = x.copy()
                 del data_log["epoch"]
                 wandb.log({"training_" + str(fold): data_log})
+                # Step learning rate scheduler after each epoch
+                scheduler.step()
 
             history = fitter.fit(train_dataloader, test_dataloader, n_epochs=n_epochs, callbacks=[wandb_update])
 
