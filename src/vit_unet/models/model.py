@@ -75,12 +75,8 @@ def upsampling(encoded_patches: torch.Tensor, num_channels: int) -> torch.Tensor
     return new_patches_flattened
 
 
+# Class PatchEncoder, to include initial and positional encoding
 class PatchEncoder(torch.nn.Module):
-    """Patch encoder with optional preprocessing and positional encoding.
-
-    Converts images into patches and applies positional embeddings.
-    Supports convolutional, Fourier, or no preprocessing.
-    """
     def __init__(
         self,
         img_size: int,
@@ -117,8 +113,8 @@ class PatchEncoder(torch.nn.Module):
         if self.preprocessing == "conv":
             x = self.conv2d(x)
         elif self.preprocessing == "fourier":
-            x = torch.fft.fft2(x).real
-        patches = patch(x, self.patch_size)
+            x = torch.fft.fft2(x).real  # pyright: ignore[reportUnknownVariableType]
+        patches = patch(x, self.patch_size)  # pyright: ignore[reportUnknownArgumentType]
         flat_patches = torch.flatten(patches, -3, -1)
         encoded = flat_patches + self.position_embedding(self.positions)
         encoded = torch.flatten(
@@ -127,9 +123,8 @@ class PatchEncoder(torch.nn.Module):
         return encoded
 
 
+# AutoEncoder implementation
 class FeedForward(torch.nn.Module):
-    """Feed-forward network with GELU activation and dropout."""
-
     def __init__(self, projection_dim: int, hidden_dim: int, dropout: float) -> None:
         super().__init__()
         self.net = torch.nn.Sequential(
@@ -171,7 +166,7 @@ class FformerEncoder(torch.nn.Module):
         )
 
     def forward(self, encoded_patches: torch.Tensor) -> torch.Tensor:
-        encoded_patches += torch.fft.fft2(encoded_patches).real
+        encoded_patches += torch.fft.fft2(encoded_patches).real  # pyright: ignore[reportUnknownVariableType]
         encoded_patches = self.LN(encoded_patches)
         encoded_patches += self.FeedForward(encoded_patches)
         encoded_patches = self.LN(encoded_patches)
@@ -217,20 +212,20 @@ class ReAttention(torch.nn.Module):
         self.proj_drop = torch.nn.Dropout(proj_drop)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_num, n_patches, channels = x.shape
+        batch_num, n_patches, cannels = x.shape
         q = (
             torch.flatten(torch.stack([self.qconv2d(y) for y in unflatten(x, self.num_channels)], dim=0), -3, -1)
-            .reshape(batch_num, n_patches, 1, self.num_heads, channels // self.num_heads)
+            .reshape(batch_num, n_patches, 1, self.num_heads, cannels // self.num_heads)
             .permute(2, 0, 3, 1, 4)[0]
         )
         k = (
             torch.flatten(torch.stack([self.kconv2d(y) for y in unflatten(x, self.num_channels)], dim=0), -3, -1)
-            .reshape(batch_num, n_patches, 1, self.num_heads, channels // self.num_heads)
+            .reshape(batch_num, n_patches, 1, self.num_heads, cannels // self.num_heads)
             .permute(2, 0, 3, 1, 4)[0]
         )
         v = (
             torch.flatten(torch.stack([self.vconv2d(y) for y in unflatten(x, self.num_channels)], dim=0), -3, -1)
-            .reshape(batch_num, n_patches, 1, self.num_heads, channels // self.num_heads)
+            .reshape(batch_num, n_patches, 1, self.num_heads, cannels // self.num_heads)
             .permute(2, 0, 3, 1, 4)[0]
         )
         attn = (torch.matmul(q, k.transpose(-2, -1))) * self.scale
@@ -239,7 +234,7 @@ class ReAttention(torch.nn.Module):
         if self.apply_transform:
             attn = self.var_norm(self.reatten_matrix(attn)) * self.reatten_scale
         attn_next = attn
-        x = (torch.matmul(attn, v)).transpose(1, 2).reshape(batch_num, n_patches, channels)
+        x = (torch.matmul(attn, v)).transpose(1, 2).reshape(batch_num, n_patches, cannels)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x, attn_next
@@ -332,20 +327,20 @@ class SkipConnection(torch.nn.Module):
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         assert q.shape == k.shape
         assert k.shape == v.shape
-        batch_num, n_patches, channels = q.shape
+        batch_num, n_patches, cannels = q.shape
         q = (
             torch.flatten(torch.stack([self.qconv2d(y) for y in unflatten(q, self.num_channels)], dim=0), -3, -1)
-            .reshape(batch_num, n_patches, 1, self.num_heads, channels // self.num_heads)
+            .reshape(batch_num, n_patches, 1, self.num_heads, cannels // self.num_heads)
             .permute(2, 0, 3, 1, 4)[0]
         )
         k = (
             torch.flatten(torch.stack([self.kconv2d(y) for y in unflatten(k, self.num_channels)], dim=0), -3, -1)
-            .reshape(batch_num, n_patches, 1, self.num_heads, channels // self.num_heads)
+            .reshape(batch_num, n_patches, 1, self.num_heads, cannels // self.num_heads)
             .permute(2, 0, 3, 1, 4)[0]
         )
         v = (
             torch.flatten(torch.stack([self.vconv2d(y) for y in unflatten(v, self.num_channels)], dim=0), -3, -1)
-            .reshape(batch_num, n_patches, 1, self.num_heads, channels // self.num_heads)
+            .reshape(batch_num, n_patches, 1, self.num_heads, cannels // self.num_heads)
             .permute(2, 0, 3, 1, 4)[0]
         )
         attn = (torch.matmul(q, k.transpose(-2, -1))) * self.scale
@@ -353,19 +348,14 @@ class SkipConnection(torch.nn.Module):
         attn = self.attn_drop(attn)
         attn = self.var_norm(self.reatten_matrix(attn)) * self.reatten_scale
 
-        x = torch.matmul(attn, v).transpose(1, 2).reshape(batch_num, n_patches, channels)
+        x = torch.matmul(attn, v).transpose(1, 2).reshape(batch_num, n_patches, cannels)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
 
 
-class HViT_UNet(torch.nn.Module):
-    """Hierarchical Vision Transformer U-Net for image denoising and restoration.
-
-    A U-Net architecture using vision transformers with re-attention mechanisms
-    and skip connections for efficient image processing.
-    """
-
+# Model architecture
+class ViTUNet(torch.nn.Module):
     def __init__(
         self,
         depth: int,
@@ -493,83 +483,114 @@ class HViT_UNet(torch.nn.Module):
         if self.preprocessing == "conv":
             self.conv2d = torch.nn.Conv2d(self.num_channels, self.num_channels, 3, padding="same")
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Previous validations
-        x = torchvision.transforms.Resize(self.im_size)(x)
-        batch_size, _, _, _ = x.size()
-
-        # "Preprocessing"
-        x_patch = self.PE(x)
-        if self.verbose:
-            print("Patch Encoder")
-            print(torch.cuda.memory_summary("cuda"))
-
-        # Encoders
-        encoder_skip = []
+    def _encode_patches(self, x_patch: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Process encoding layers and collect skip connections."""
+        encoder_skip: list[torch.Tensor] = []
         for i, enc in enumerate(self.Encoders):
             x_patch = enc(x_patch)
             if (i + 1) % self.depth_te == 0:
                 encoder_skip.append(x_patch)
                 x_patch = downsampling(x_patch, self.num_channels)
-                if self.verbose:
-                    print(f"Encoder {i}")
-                    print("\t Shape after level " + str((i + 1) // self.depth_te) + " of encoding:", x_patch.size())
-                    print(torch.cuda.memory_summary("cuda"))
+                self._log_encoder_step(i, x_patch)
+        return x_patch, encoder_skip
 
-        # Bottleneck
+    def _process_bottleneck(self, x_patch: torch.Tensor) -> torch.Tensor:
+        """Process bottleneck layers."""
         for i, bottle in enumerate(self.BottleNeck):
             x_patch = bottle(x_patch)
-            if self.verbose:
-                print(f"Bottleneck {i}")
-                print("\tShape after step " + str(i + 1) + " of bottleneck:", x_patch.size())
-                print(torch.cuda.memory_summary("cuda"))
+            self._log_bottleneck_step(i, x_patch)
+        return x_patch
 
-        # Decoders
+    def _decode_patches(self, x_patch: torch.Tensor, encoder_skip: list[torch.Tensor]) -> torch.Tensor:
+        """Process decoding layers with skip connections."""
         for i, dec in enumerate(self.Decoders):
             x_patch = dec(x_patch)
             if (i + 1) % self.depth_te == 0:
-                x_patch = upsampling(x_patch, self.num_channels)
-                assert encoder_skip[self.depth - ((i + 1) // self.depth_te)].shape == x_patch.shape, (
-                    "enc and dec not same shape"
-                )
-                x_patch = self.SkipConnections[(i + 1) // self.depth_te - 1](
-                    encoder_skip[self.depth - ((i + 1) // self.depth_te)], x_patch, x_patch
-                )
-                if self.verbose:
-                    print(f"Decoder {i}")
-                    print("\tShape after step " + str(i + 1) + " of decoder:", x_patch.size())
-                    print(torch.cuda.memory_summary("cuda"))
+                x_patch = self._apply_skip_connection(x_patch, encoder_skip, i)
+                self._log_decoder_step(i, x_patch)
+        return x_patch
 
-        # Output
+    def _apply_skip_connection(self, x_patch: torch.Tensor, encoder_skip: list[torch.Tensor], i: int) -> torch.Tensor:
+        """Apply upsampling and skip connection.
+
+        Raises:
+            ValueError: If encoder and decoder tensors have incompatible shapes.
+        """
+        x_patch = upsampling(x_patch, self.num_channels)
+        skip_idx = self.depth - ((i + 1) // self.depth_te)
+        if encoder_skip[skip_idx].shape != x_patch.shape:
+            msg = "enc and dec not same shape"
+            raise ValueError(msg)
+        return self.SkipConnections[(i + 1) // self.depth_te - 1](encoder_skip[skip_idx], x_patch, x_patch)
+
+    def _apply_final_processing(self, x_patch: torch.Tensor, batch_size: int, x: torch.Tensor) -> torch.Tensor:
+        """Apply final preprocessing and return result."""
         x_restored = unpatch(unflatten(x_patch, self.num_channels), self.num_channels).reshape(
             batch_size, self.num_channels, self.im_size, self.im_size
         )
+
         if self.preprocessing == "conv":
             x_restored = self.conv2d(x_restored)
         elif self.preprocessing == "fourier":
-            x_restored = torch.fft.ifft2(x, norm="ortho").real
+            x_restored = torch.fft.ifft2(x, norm="ortho").real  # pyright: ignore[reportUnknownVariableType]
+
+        self._log_final()
+        return x_restored  # pyright: ignore[reportUnknownVariableType]
+
+    def _log_encoder_step(self, i: int, x_patch: torch.Tensor) -> None:
+        """Log encoder step if verbose."""
+        if self.verbose:
+            print(f"Encoder {i}")
+            print("\t Shape after level " + str((i + 1) // self.depth_te) + " of encoding:", x_patch.size())
+            print(torch.cuda.memory_summary("cuda"))
+
+    def _log_bottleneck_step(self, i: int, x_patch: torch.Tensor) -> None:
+        """Log bottleneck step if verbose."""
+        if self.verbose:
+            print(f"Bottleneck {i}")
+            print("\tShape after step " + str(i + 1) + " of bottleneck:", x_patch.size())
+            print(torch.cuda.memory_summary("cuda"))
+
+    def _log_decoder_step(self, i: int, x_patch: torch.Tensor) -> None:
+        """Log decoder step if verbose."""
+        if self.verbose:
+            print(f"Decoder {i}")
+            print("\tShape after step " + str(i + 1) + " of decoder:", x_patch.size())
+            print(torch.cuda.memory_summary("cuda"))
+
+    def _log_final(self) -> None:
+        """Log final step if verbose."""
         if self.verbose:
             print("Final")
             print(torch.cuda.memory_summary("cuda"))
 
-        return x_restored
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Previous validations
+        x = torchvision.transforms.Resize(self.im_size)(x)
+        batch_size, _, _, _ = x.size()
+
+        # Preprocessing
+        x_patch = self.PE(x)
+        if self.verbose:
+            print("Patch Encoder")
+            print(torch.cuda.memory_summary("cuda"))
+
+        # Encoding phase
+        x_patch, encoder_skip = self._encode_patches(x_patch)
+
+        # Bottleneck phase
+        x_patch = self._process_bottleneck(x_patch)
+
+        # Decoding phase
+        x_patch = self._decode_patches(x_patch, encoder_skip)
+
+        # Final processing
+        return self._apply_final_processing(x_patch, batch_size, x)
 
 
-def get_vit_unet(model_string: str, verbose: bool = False) -> HViT_UNet:
-    """Factory function to create a pre-configured HViT_UNet model.
-
-    Args:
-        model_string: Model size variant ('lite', 'base', or 'large').
-        verbose: Whether to print verbose debug information during forward pass.
-
-    Returns:
-        Configured HViT_UNet model instance.
-
-    Raises:
-        ValueError: If model_string is not a valid variant.
-    """
-    if model_string.lower() == "lite":
-        return HViT_UNet(
+def get_vit_unet(model_string: Literal["lite", "base", "large"], verbose: bool = False) -> ViTUNet:
+    if model_string == "lite":
+        return ViTUNet(
             depth=2,
             depth_te=1,
             size_bottleneck=2,
@@ -585,8 +606,8 @@ def get_vit_unet(model_string: str, verbose: bool = False) -> HViT_UNet:
             verbose=verbose,
         )
 
-    if model_string.lower() == "base":
-        return HViT_UNet(
+    if model_string == "base":
+        return ViTUNet(
             depth=2,
             depth_te=2,
             size_bottleneck=2,
@@ -602,8 +623,8 @@ def get_vit_unet(model_string: str, verbose: bool = False) -> HViT_UNet:
             verbose=verbose,
         )
 
-    if model_string.lower() == "large":
-        return HViT_UNet(
+    if model_string == "large":
+        return ViTUNet(
             depth=2,
             depth_te=4,
             size_bottleneck=4,
