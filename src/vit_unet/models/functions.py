@@ -12,12 +12,14 @@ class Batch(TypedDict):
     y: torch.Tensor
 
 
-def psnr(model: torch.nn.Module, dataloader: torch.utils.data.DataLoader[Batch]) -> npt.NDArray[np.float64]:
+def psnr(
+    model: torch.nn.Module, dataloader: torch.utils.data.DataLoader[Batch], device: torch.device
+) -> npt.NDArray[np.float64]:
     # Calculate PSNR
     score: list[float] = []
     with torch.no_grad():
         for batch in dataloader:
-            x = batch["x"].to("cuda").float()
+            x = batch["x"].to(device).float()
             output = model(x).cpu().numpy()
             y = batch["y"].numpy()
 
