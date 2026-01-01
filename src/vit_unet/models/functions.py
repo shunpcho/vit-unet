@@ -40,5 +40,5 @@ def softmax_top(x: torch.Tensor, top: int) -> torch.Tensor:
     )
     axis = torch.stack([elem.T for elem in dct_axis for _ in range(top)], dim=-1)
     idx = torch.cat([axis, idx], dim=0)
-    y = torch.sparse_coo_tensor(idx, values.flatten(), x.size(), device=x.device, dtype=x.dtype).to_dense()  # pyright: ignore[reportUnknownMemberType]
+    y = torch.sparse_coo_tensor(idx, values.flatten(), x.size(), device=x.device, dtype=x.dtype).to_dense()
     return y

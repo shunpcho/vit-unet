@@ -1,11 +1,12 @@
 from typing import Literal
 
+from vit_unet.config.model_config import VitunetConfig
 from vit_unet.models.model import ViTUNet
 
 
 def get_vit_unet(model_string: Literal["lite", "base", "large"], verbose: bool = False) -> ViTUNet:
     if model_string == "lite":
-        return ViTUNet(
+        config = VitunetConfig(
             depth=2,
             depth_te=1,
             size_bottleneck=2,
@@ -20,9 +21,10 @@ def get_vit_unet(model_string: Literal["lite", "base", "large"], verbose: bool =
             linear_drop=0,
             verbose=verbose,
         )
+        return ViTUNet(config)
 
     if model_string == "base":
-        return ViTUNet(
+        config = VitunetConfig(
             depth=2,
             depth_te=2,
             size_bottleneck=2,
@@ -37,9 +39,10 @@ def get_vit_unet(model_string: Literal["lite", "base", "large"], verbose: bool =
             linear_drop=0,
             verbose=verbose,
         )
+        return ViTUNet(config)
 
     if model_string == "large":
-        return ViTUNet(
+        config = VitunetConfig(
             depth=2,
             depth_te=4,
             size_bottleneck=4,
@@ -47,12 +50,14 @@ def get_vit_unet(model_string: Literal["lite", "base", "large"], verbose: bool =
             im_size=256,
             patch_size=32,
             num_channels=3,
-            hidden_dim=128,
+            hidden_dim=256,
             num_heads=8,
             attn_drop=0.2,
             proj_drop=0.2,
             linear_drop=0,
             verbose=verbose,
         )
+        return ViTUNet(config)
+
     msg = f"Model string {model_string} not valid"
     raise ValueError(msg)

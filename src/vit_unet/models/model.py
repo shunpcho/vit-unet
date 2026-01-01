@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 
 import numpy as np
 import torch
 import torchvision
+
+if TYPE_CHECKING:
+    from vit_unet.config.model_config import VitunetConfig
 
 # 4: batch, channels, height, width
 IMAGE_DIMS = 4
@@ -19,8 +22,9 @@ def patch(x: torch.Tensor, patch_size: int) -> torch.Tensor:
     if len(x.size()) == PATCHED_IMAGE_DIMS:
         x = torch.squeeze(x, dim=1)
     height, width = x.shape[-2], x.shape[-1]
-    assert height % patch_size == 0, "Patch size must divide images height"
-    assert width % patch_size == 0, "Patch size must divide images width"
+    if height % patch_size != 0 or width % patch_size != 0:
+        msg = f"Patch size {patch_size} must divide image dimensions ({height}x{width})"
+        raise ValueError(msg)
     patches = x.unfold(2, patch_size, patch_size).unfold(3, patch_size, patch_size)
     patch_list = torch.flatten(patches, 2, 3).permute(0, 2, 1, 3, 4)
     return patch_list
@@ -46,7 +50,9 @@ def unpatch(x: torch.Tensor, num_channels: int) -> torch.Tensor:
     if len(x.size()) < PATCHED_IMAGE_DIMS:
         x = unflatten(x, num_channels)
     batch, n_patches, channels, height, width = x.size()
-    assert channels == num_channels, "Num. channels must agree"
+    if channels != num_channels:
+        msg = "Number of channels does not match"
+        raise ValueError(msg)
     elem_per_axis = int(np.sqrt(n_patches))
 
     # Reshape patches to grid layout and reconstruct image (vectorized, no loops)
@@ -61,7 +67,7 @@ def unpatch(x: torch.Tensor, num_channels: int) -> torch.Tensor:
 # Auxiliary methods to downsampling & upsampling
 def downsampling(encoded_patches: torch.Tensor, num_channels: int) -> torch.Tensor:
     """Downsample by reducing spatial resolution of patches."""
-    batch, n_patches, projection_dim = encoded_patches.size()
+    _, _, projection_dim = encoded_patches.size()
 
     # Calculate current patch dimensions
     height = int(np.sqrt(projection_dim // num_channels))
@@ -79,7 +85,7 @@ def downsampling(encoded_patches: torch.Tensor, num_channels: int) -> torch.Tens
 
 def upsampling(encoded_patches: torch.Tensor, num_channels: int) -> torch.Tensor:
     """Upsample by increasing spatial resolution of patches."""
-    batch, n_patches, projection_dim = encoded_patches.size()
+    _, _, projection_dim = encoded_patches.size()
 
     # Calculate current patch dimensions
     height = int(np.sqrt(projection_dim // num_channels))
@@ -226,48 +232,91 @@ class ReAttention(torch.nn.Module):
         self.proj = torch.nn.Linear(dim, dim)
         self.proj_drop = torch.nn.Dropout(proj_drop)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _prepare_conv_input(self, x: torch.Tensor) -> tuple[torch.Tensor, int, int, int]:
+        """Prepare input for convolution by unflattening and reshaping.
+
+        Returns:
+            tuple: (reshaped_input, batch, n_patches, projection_dim)
+        """
         batch, n_patches, projection_dim = x.shape
-
-        # Unflatten once for efficiency
-        x_unflat = unflatten(x, self.num_channels)  # (batch, n_patches, channels, height, width)
-        batch, n_patches, channels, height, width = x_unflat.shape
-
-        # Reshape to apply conv2d in batch: (batch*n_patches, channels, height, width)
+        x_unflat = unflatten(x, self.num_channels)
+        _, _, channels, height, width = x_unflat.shape
         x_conv_input = x_unflat.reshape(batch * n_patches, channels, height, width)
+        return x_conv_input, batch, n_patches, projection_dim
 
-        # Apply convolutions in batch (no loops)
-        q_conv = self.qconv2d(x_conv_input).reshape(batch, n_patches, channels, height, width)
+    def _apply_qkv_convolutions(
+        self, x_conv_input: torch.Tensor, batch: int, n_patches: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply Q, K, V convolutions and reshape back to patch format.
+
+        Returns:
+            tuple: (q_conv, k_conv, v_conv) each with shape (batch, n_patches, channels, height, width)
+        """
+        # Infer output shape from first convolution
+        q_out = self.qconv2d(x_conv_input)
+        _, channels, height, width = q_out.shape
+
+        q_conv = q_out.reshape(batch, n_patches, channels, height, width)
         k_conv = self.kconv2d(x_conv_input).reshape(batch, n_patches, channels, height, width)
         v_conv = self.vconv2d(x_conv_input).reshape(batch, n_patches, channels, height, width)
+        return q_conv, k_conv, v_conv
 
-        # Flatten and reshape for attention
-        q = (
-            torch.flatten(q_conv, -3, -1)
-            .reshape(batch, n_patches, self.num_heads, projection_dim // self.num_heads)
-            .transpose(1, 2)
-        )
-        k = (
-            torch.flatten(k_conv, -3, -1)
-            .reshape(batch, n_patches, self.num_heads, projection_dim // self.num_heads)
-            .transpose(1, 2)
-        )
-        v = (
-            torch.flatten(v_conv, -3, -1)
-            .reshape(batch, n_patches, self.num_heads, projection_dim // self.num_heads)
-            .transpose(1, 2)
-        )
+    def _prepare_attention_tensors(
+        self,
+        q_conv: torch.Tensor,
+        k_conv: torch.Tensor,
+        v_conv: torch.Tensor,
+        batch: int,
+        n_patches: int,
+        projection_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Flatten and reshape convolution outputs for multi-head attention.
 
-        attn = (torch.matmul(q, k.transpose(-2, -1))) * self.scale
+        Returns:
+            tuple: (q, k, v) reshaped for attention computation
+        """
+        head_dim = projection_dim // self.num_heads
+
+        q = torch.flatten(q_conv, -3, -1).reshape(batch, n_patches, self.num_heads, head_dim).transpose(1, 2)
+        k = torch.flatten(k_conv, -3, -1).reshape(batch, n_patches, self.num_heads, head_dim).transpose(1, 2)
+        v = torch.flatten(v_conv, -3, -1).reshape(batch, n_patches, self.num_heads, head_dim).transpose(1, 2)
+        return q, k, v
+
+    def _compute_attention(
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, batch: int, n_patches: int, projection_dim: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute multi-head attention and return output.
+
+        Returns:
+            tuple: (output, attention_weights)
+        """
+        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
         attn = torch.nn.functional.softmax(attn, dim=-1)
         attn = self.attn_drop(attn)
+
         if self.apply_transform:
             attn = self.var_norm(self.reatten_matrix(attn)) * self.reatten_scale
-        attn_next = attn
-        x = torch.matmul(attn, v).transpose(1, 2).reshape(batch, n_patches, projection_dim)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x, attn_next
+
+        attn_weights = attn
+        output = torch.matmul(attn, v).transpose(1, 2).reshape(batch, n_patches, projection_dim)
+        output = self.proj(output)
+        output = self.proj_drop(output)
+        return output, attn_weights
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # Prepare convolution input
+        x_conv_input, batch, n_patches, projection_dim = self._prepare_conv_input(x)
+
+        # Apply Q, K, V convolutions
+        q_conv, k_conv, v_conv = self._apply_qkv_convolutions(x_conv_input, batch, n_patches)
+
+        # Prepare attention tensors
+        q, k, v = self._prepare_attention_tensors(q_conv, k_conv, v_conv, batch, n_patches, projection_dim)
+
+        # Compute attention and get output
+        output, attn_weights = self._compute_attention(q, k, v, batch, n_patches, projection_dim)
+
+        return output, attn_weights
 
 
 class ReAttentionTransformerEncoder(torch.nn.Module):
@@ -351,123 +400,168 @@ class SkipConnection(torch.nn.Module):
         self.proj = torch.nn.Linear(dim, dim)
         self.proj_drop = torch.nn.Dropout(proj_drop)
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        assert q.shape == k.shape
-        assert k.shape == v.shape
+    def _prepare_qkv_inputs(
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int]:
+        """Prepare Q, K, V inputs by unflattening and reshaping for convolution.
+
+        Returns:
+            tuple: (q_input, k_input, v_input, batch, n_patches, projection_dim)
+        """
         batch, n_patches, projection_dim = q.shape
 
-        # Unflatten all inputs once
-        q_unflat = unflatten(q, self.num_channels)  # (batch, n_patches, channels, height, width)
+        q_unflat = unflatten(q, self.num_channels)
         k_unflat = unflatten(k, self.num_channels)
         v_unflat = unflatten(v, self.num_channels)
-        batch, n_patches, channels, height, width = q_unflat.shape
 
-        # Reshape to apply conv2d in batch: (batch*n_patches, channels, height, width)
-        q_conv_input = q_unflat.reshape(batch * n_patches, channels, height, width)
-        k_conv_input = k_unflat.reshape(batch * n_patches, channels, height, width)
-        v_conv_input = v_unflat.reshape(batch * n_patches, channels, height, width)
+        _, _, channels, height, width = q_unflat.shape
 
-        # Apply convolutions in batch (no loops)
-        q_conv = self.qconv2d(q_conv_input).reshape(batch, n_patches, channels, height, width)
-        k_conv = self.kconv2d(k_conv_input).reshape(batch, n_patches, channels, height, width)
-        v_conv = self.vconv2d(v_conv_input).reshape(batch, n_patches, channels, height, width)
+        q_input = q_unflat.reshape(batch * n_patches, channels, height, width)
+        k_input = k_unflat.reshape(batch * n_patches, channels, height, width)
+        v_input = v_unflat.reshape(batch * n_patches, channels, height, width)
 
-        # Flatten and reshape for attention
-        q_attn = (
-            torch.flatten(q_conv, -3, -1)
-            .reshape(batch, n_patches, self.num_heads, projection_dim // self.num_heads)
-            .transpose(1, 2)
-        )
-        k_attn = (
-            torch.flatten(k_conv, -3, -1)
-            .reshape(batch, n_patches, self.num_heads, projection_dim // self.num_heads)
-            .transpose(1, 2)
-        )
-        v_attn = (
-            torch.flatten(v_conv, -3, -1)
-            .reshape(batch, n_patches, self.num_heads, projection_dim // self.num_heads)
-            .transpose(1, 2)
-        )
+        return q_input, k_input, v_input, batch, n_patches, projection_dim
 
-        attn = (torch.matmul(q_attn, k_attn.transpose(-2, -1))) * self.scale
+    def _apply_skip_convolutions(
+        self, q_input: torch.Tensor, k_input: torch.Tensor, v_input: torch.Tensor, batch: int, n_patches: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply convolutions to Q, K, V for skip connection.
+
+        Returns:
+            tuple: (q_conv, k_conv, v_conv) reshaped to (batch, n_patches, channels, height, width)
+        """
+        q_out = self.qconv2d(q_input)
+        _, channels, height, width = q_out.shape
+
+        q_conv = q_out.reshape(batch, n_patches, channels, height, width)
+        k_conv = self.kconv2d(k_input).reshape(batch, n_patches, channels, height, width)
+        v_conv = self.vconv2d(v_input).reshape(batch, n_patches, channels, height, width)
+
+        return q_conv, k_conv, v_conv
+
+    def _compute_skip_attention(
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, batch: int, n_patches: int, projection_dim: int
+    ) -> torch.Tensor:
+        """Compute attention for skip connection and return output.
+
+        Returns:
+            torch.Tensor: Output after attention and projection
+        """
+        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
         attn = torch.nn.functional.softmax(attn, dim=-1)
         attn = self.attn_drop(attn)
         attn = self.var_norm(self.reatten_matrix(attn)) * self.reatten_scale
 
-        x = torch.matmul(attn, v_attn).transpose(1, 2).reshape(batch, n_patches, projection_dim)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
+        output = torch.matmul(attn, v).transpose(1, 2).reshape(batch, n_patches, projection_dim)
+        output = self.proj(output)
+        output = self.proj_drop(output)
+
+        return output
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        if q.shape != k.shape or k.shape != v.shape:
+            msg = "Q, K, and V must have the same shape"
+            raise ValueError(msg)
+
+        # Prepare inputs
+        q_input, k_input, v_input, batch, n_patches, projection_dim = self._prepare_qkv_inputs(q, k, v)
+
+        # Apply convolutions
+        q_conv, k_conv, v_conv = self._apply_skip_convolutions(q_input, k_input, v_input, batch, n_patches)
+
+        # Prepare attention tensors (reuse method from ReAttention parent logic)
+        head_dim = projection_dim // self.num_heads
+        q_attn = torch.flatten(q_conv, -3, -1).reshape(batch, n_patches, self.num_heads, head_dim).transpose(1, 2)
+        k_attn = torch.flatten(k_conv, -3, -1).reshape(batch, n_patches, self.num_heads, head_dim).transpose(1, 2)
+        v_attn = torch.flatten(v_conv, -3, -1).reshape(batch, n_patches, self.num_heads, head_dim).transpose(1, 2)
+
+        # Compute attention and output
+        return self._compute_skip_attention(q_attn, k_attn, v_attn, batch, n_patches, projection_dim)
 
 
 # Model architecture
 class ViTUNet(torch.nn.Module):
-    def __init__(
-        self,
-        depth: int,
-        depth_te: int,
-        size_bottleneck: int,
-        preprocessing: Literal["conv", "fourier", "none"],
-        im_size: int,
-        patch_size: int,
-        num_channels: int,
-        hidden_dim: int,
-        num_heads: int,
-        attn_drop: float,
-        proj_drop: float,
-        linear_drop: float,
-        verbose: bool = False,
-    ) -> None:
+    def __init__(self, config: VitunetConfig) -> None:
         super().__init__()
-        if patch_size % (2 ** (depth)) != 0:
-            msg = "Depth must be adjusted, final patch size is incompatible."
+        self.config = config
+        self._validate_config()
+        self._setup_dimensions()
+        self._print_architecture_info()
+        self._build_layers()
+
+    def _validate_config(self) -> None:
+        """Validate configuration parameters.
+
+        Raises:
+            ValueError: If depth is incompatible with patch size, final patch size is too small,
+                       patch size doesn't divide image size, or preprocessing method is invalid.
+        """
+        final_patch_size = self.config.patch_size // (2**self.config.depth)
+        if self.config.patch_size % (2**self.config.depth) != 0:
+            msg = f"Depth {self.config.depth} incompatible: patch_size {self.config.patch_size} not divisible"
             raise ValueError(msg)
-        if patch_size // (2 ** (depth)) < MINIMUM_PATCH_SIZE:
-            msg = f"Depth must be adjusted, final patch size is too small (lower than {MINIMUM_PATCH_SIZE})."
+        if final_patch_size < MINIMUM_PATCH_SIZE:
+            msg = f"Final patch size {final_patch_size} < minimum {MINIMUM_PATCH_SIZE}"
             raise ValueError(msg)
-        if im_size % patch_size != 0:
-            msg = "Patch size is not compatible with image size."
+        if self.config.im_size % self.config.patch_size != 0:
+            msg = f"Patch size {self.config.patch_size} must divide image size {self.config.im_size}"
             raise ValueError(msg)
-        if preprocessing not in {"conv", "fourier", "none"}:
-            msg = f"preprocessing must be one of ['conv', 'fourier', 'none'], got '{preprocessing}'"
+        if self.config.preprocessing not in {"conv", "fourier", "none"}:
+            msg = f"preprocessing must be 'conv', 'fourier', or 'none', got '{self.config.preprocessing}'"
             raise ValueError(msg)
-        # Parameters
-        self.depth = depth
-        self.depth_te = depth_te
-        self.size_bottleneck = size_bottleneck
-        self.preprocessing = preprocessing
-        self.im_size = im_size
-        self.patch_size = patch_size
+
+    def _setup_dimensions(self) -> None:
+        """Calculate derived dimensions from config."""
+        self.depth = self.config.depth
+        self.depth_te = self.config.depth_te
+        self.size_bottleneck = self.config.size_bottleneck
+        self.preprocessing = self.config.preprocessing
+        self.im_size = self.config.im_size
+        self.patch_size = self.config.patch_size
         self.num_patches = (self.im_size // self.patch_size) ** 2
-        self.num_channels = num_channels
+        self.num_channels = self.config.num_channels
         self.projection_dim = self.num_channels * (self.patch_size) ** 2
-        self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
-        self.attn_drop = attn_drop
-        self.proj_drop = proj_drop
-        self.linear_drop = linear_drop
-        self.verbose = verbose
-        # Info
+        self.hidden_dim = self.config.hidden_dim
+        self.num_heads = self.config.num_heads
+        self.attn_drop = self.config.attn_drop
+        self.proj_drop = self.config.proj_drop
+        self.linear_drop = self.config.linear_drop
+        self.verbose = self.config.verbose
+
+    def _print_architecture_info(self) -> None:
+        """Print architecture information."""
         print("Architecture information:")
-        for i in range(depth + 1):
+        for i in range(self.config.depth + 1):
             print(f"Level {i}:")
             print("\tPatch size:", self.patch_size // (2**i))
             print("\tNum. patches:", self.num_patches * (4**i))
             print("\tProjection size:", (self.num_channels * self.patch_size**2) // (4**i))
             print("\tHidden dim. size:", self.hidden_dim // (2**i))
-        # Layers
+
+    def _build_layers(self) -> None:
+        """Construct all model layers."""
+        self._build_patch_encoder()
+        self._build_encoder()
+        self._build_bottleneck()
+        self._build_decoder()
+        self._build_output()
+
+    def _build_patch_encoder(self) -> None:
+        """Construct patch encoder."""
         self.PE = PatchEncoder(
             img_size=self.im_size,
             patch_size=self.patch_size,
             num_channels=self.num_channels,
-            preprocessing=self.preprocessing,
+            preprocessing=self.config.preprocessing,
         )
 
+    def _build_encoder(self) -> None:
+        """Construct encoder layers."""
         self.Encoders = torch.nn.ModuleList()
         for level in range(self.depth):
             exp_factor = 4 ** (level)
             exp_factor_hidden = 2 ** (level)
-            for _ in range(depth_te):
+            for _ in range(self.depth_te):
                 self.Encoders.append(
                     ReAttentionTransformerEncoder(
                         self.num_patches * exp_factor,
@@ -480,10 +574,13 @@ class ViTUNet(torch.nn.Module):
                         self.linear_drop,
                     )
                 )
+
+    def _build_bottleneck(self) -> None:
+        """Construct bottleneck layers."""
         self.BottleNeck = torch.nn.ModuleList()
+        exp_factor = 4 ** (self.depth)
+        exp_factor_hidden = 2 ** (self.depth)
         for _ in range(self.size_bottleneck):
-            exp_factor = 4 ** (self.depth)
-            exp_factor_hidden = 2 ** (self.depth)
             self.BottleNeck.append(
                 ReAttentionTransformerEncoder(
                     self.num_patches * exp_factor,
@@ -496,13 +593,16 @@ class ViTUNet(torch.nn.Module):
                     self.linear_drop,
                 )
             )
+
+    def _build_decoder(self) -> None:
+        """Construct decoder layers and skip connections."""
         self.Decoders = torch.nn.ModuleList()
         self.SkipConnections = torch.nn.ModuleList()
         for level in range(self.depth):
             exp_factor = 4 ** (self.depth - level)
             exp_factor_skip = 4 ** (self.depth - level - 1)
             exp_factor_hidden = 2 ** (self.depth - level)
-            for _ in range(depth_te):
+            for _ in range(self.depth_te):
                 self.Decoders.append(
                     ReAttentionTransformerEncoder(
                         self.num_patches * exp_factor,
@@ -525,7 +625,8 @@ class ViTUNet(torch.nn.Module):
                 )
             )
 
-        # Output
+    def _build_output(self) -> None:
+        """Construct output layer."""
         if self.preprocessing == "conv":
             self.conv2d = torch.nn.Conv2d(self.num_channels, self.num_channels, 3, padding="same")
 
