@@ -44,9 +44,8 @@ def unflatten(flattened: torch.Tensor, num_channels: int) -> torch.Tensor:
 
 def unpatch(x: torch.Tensor, num_channels: int) -> torch.Tensor:
     if len(x.size()) < PATCHED_IMAGE_DIMS:
-        batch, n_patches, channels, height, width = unflatten(x, num_channels).size()
-    else:
-        batch, n_patches, channels, height, width = x.size()
+        x = unflatten(x, num_channels)
+    batch, n_patches, channels, height, width = x.size()
     assert channels == num_channels, "Num. channels must agree"
     elem_per_axis = int(np.sqrt(n_patches))
 
@@ -61,20 +60,37 @@ def unpatch(x: torch.Tensor, num_channels: int) -> torch.Tensor:
 
 # Auxiliary methods to downsampling & upsampling
 def downsampling(encoded_patches: torch.Tensor, num_channels: int) -> torch.Tensor:
-    _, _, embeddings = encoded_patches.size()
-    # channels, height, width = num_channels, int(np.sqrt(embeddings / num_channels)), int(np.sqrt(embeddings / num_channels))
-    height = int(np.sqrt(embeddings / num_channels))
-    original_image = unpatch(unflatten(encoded_patches, num_channels), num_channels)
-    new_patches = patch(original_image, patch_size=height // 2)
+    """Downsample by reducing spatial resolution of patches."""
+    batch, n_patches, projection_dim = encoded_patches.size()
+
+    # Calculate current patch dimensions
+    height = int(np.sqrt(projection_dim // num_channels))
+
+    # Reconstruct image from patches
+    x_unflat = unflatten(encoded_patches, num_channels)  # (batch, n_patches, channels, height, width)
+    original_image = unpatch(x_unflat, num_channels)
+
+    # Create new patches with smaller size (downsampling)
+    new_patch_size = height // 2
+    new_patches = patch(original_image, patch_size=new_patch_size)
     new_patches_flattened = torch.flatten(new_patches, start_dim=-3, end_dim=-1)
     return new_patches_flattened
 
 
 def upsampling(encoded_patches: torch.Tensor, num_channels: int) -> torch.Tensor:
-    _, _, embeddings = encoded_patches.size()
-    height = int(np.sqrt(embeddings / num_channels))
-    original_image = unpatch(unflatten(encoded_patches, num_channels), num_channels)
-    new_patches = patch(original_image, patch_size=height * 2)
+    """Upsample by increasing spatial resolution of patches."""
+    batch, n_patches, projection_dim = encoded_patches.size()
+
+    # Calculate current patch dimensions
+    height = int(np.sqrt(projection_dim // num_channels))
+
+    # Reconstruct image from patches
+    x_unflat = unflatten(encoded_patches, num_channels)  # (batch, n_patches, channels, height, width)
+    original_image = unpatch(x_unflat, num_channels)
+
+    # Create new patches with larger size (upsampling)
+    new_patch_size = height * 2
+    new_patches = patch(original_image, patch_size=new_patch_size)
     new_patches_flattened = torch.flatten(new_patches, start_dim=-3, end_dim=-1)
     return new_patches_flattened
 
@@ -155,10 +171,8 @@ class FformerEncoder(torch.nn.Module):
         self.hidden_dim = hidden_dim
         self.dropout = dropout
         self.dtype = dtype
-        self.LN = torch.nn.LayerNorm(
-            normalized_shape=[self.num_patches, self.projection_dim],
-            dtype=self.dtype,
-        )
+        # LayerNorm only on last dimension for flexibility
+        self.LN = torch.nn.LayerNorm(self.projection_dim, dtype=self.dtype)
         self.FeedForward = FeedForward(
             projection_dim=self.projection_dim,
             hidden_dim=self.hidden_dim,
@@ -167,7 +181,7 @@ class FformerEncoder(torch.nn.Module):
         )
 
     def forward(self, encoded_patches: torch.Tensor) -> torch.Tensor:
-        encoded_patches += torch.fft.fft2(encoded_patches).real  # pyright: ignore[reportUnknownVariableType]
+        # Removed FFT2 operation for stability
         encoded_patches = self.LN(encoded_patches)
         encoded_patches += self.FeedForward(encoded_patches)
         encoded_patches = self.LN(encoded_patches)
@@ -284,12 +298,9 @@ class ReAttentionTransformerEncoder(torch.nn.Module):
             attn_drop=self.attn_drop,
             proj_drop=self.proj_drop,
         )
-        self.LN1 = torch.nn.LayerNorm(
-            normalized_shape=[self.num_patches, self.projection_dim],
-        )
-        self.LN2 = torch.nn.LayerNorm(
-            normalized_shape=[self.num_patches, self.projection_dim],
-        )
+        # LayerNorm only on last dimension to support dynamic num_patches
+        self.LN1 = torch.nn.LayerNorm(self.projection_dim)
+        self.LN2 = torch.nn.LayerNorm(self.projection_dim)
         self.FeedForward = FeedForward(
             projection_dim=self.projection_dim,
             hidden_dim=self.hidden_dim,
