@@ -13,19 +13,19 @@ from skimage.metrics import peak_signal_noise_ratio
 from sklearn.model_selection import KFold
 
 import vit_unet.models.functions as fn
-import vit_unet.models.model as models
 import wandb
 from vit_unet import dataset
+from vit_unet.models.build_model import get_vit_unet
 
 
 def train(
     input_folder: str = "/home/s.chochi/ai-works/denoiser/data/CC15",
-    n_epochs: int = 5,
-    folds: int = 5,
+    n_epochs: int = 30,
+    folds: int = 3,
     model_string: Literal["lite", "base", "large"] = "lite",
-    lr: float = 0.0001,
+    lr: float = 1e-6,
     batch_size: int = 4,
-    im_size: int | tuple[int, int] = 224,
+    im_size: int | tuple[int, int] = 256,
 ):
     torch.random.manual_seed(42)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -88,13 +88,15 @@ def train(
             )
 
             # Create model
-            model = models.get_vit_unet(model_string)
+            model = get_vit_unet(model_string)
             model.to(device)
             criterion = torch.nn.MSELoss()
             optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
             # Create fitter
-            fitter = dataset.ImageFitter(model, loss=criterion, optimizer=optimizer, device=device, folder="models")
+            fitter = dataset.ImageFitter(
+                model, loss=criterion, optimizer=optimizer, device=device, folder="results/models"
+            )
 
             def wandb_update(x):
                 data_log = x.copy()
@@ -103,7 +105,7 @@ def train(
 
             history = fitter.fit(train_dataloader, test_dataloader, n_epochs=n_epochs, callbacks=[wandb_update])
 
-            fitter.load("models/best-checkpoint.bin")
+            fitter.load("results/models/best-checkpoint.bin")
 
             # Calculate PSNR
             model = fitter.model
@@ -122,12 +124,12 @@ def train(
 def eval(
     input_folder: str = "/home/s.chochi/ai-works/denoiser/data/CC15",
     model_string: Literal["lite", "base", "large"] = "lite",
-    model_path: str = "models/best-checkpoint.bin",
+    model_path: str = "results/models/best-checkpoint.bin",
     wandb_run_path: str | None = None,
     batch_size: int = 4,
-    im_size: int | tuple[int, int] = 224,
-    output_folder: str = "inference_results",
-):
+    im_size: int | tuple[int, int] = 256,
+    output_folder: str = "results/inference_results",
+) -> None:
     """Run inference with a model trained on wandb.
 
     Args:
@@ -140,7 +142,7 @@ def eval(
         output_folder: Folder to save inference results
     """
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model = models.get_vit_unet(model_string)
+    model = get_vit_unet(model_string)
 
     # Download model from wandb
     if wandb_run_path:
@@ -148,9 +150,9 @@ def eval(
         api = wandb.Api()
         run = api.run(wandb_run_path)
         # Download model file
-        model_file = run.file("models/best-checkpoint.bin")
+        model_file = run.file("results/models/best-checkpoint.bin")
         model_file.download(replace=True)
-        model_path = "models/best-checkpoint.bin"
+        model_path = "results/models/best-checkpoint.bin"
 
     # Load model
     print(f"Loading model from {model_path}")
@@ -229,9 +231,7 @@ def eval(
     print(f"PSNR Std Dev: {std_psnr:.2f} dB")
     print(f"Results saved to: {output_folder}")
 
-    return results, psnr_scores
-
 
 if __name__ == "__main__":
-    # fire.Fire(train)
-    fire.Fire(eval)
+    fire.Fire()
+    # fire.Fire(eval)
