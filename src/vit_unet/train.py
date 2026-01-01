@@ -9,6 +9,7 @@ import fire
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from skimage.metrics import peak_signal_noise_ratio
 from sklearn.model_selection import KFold
 
 import vit_unet.models.functions as fn
@@ -18,7 +19,7 @@ from vit_unet import dataset
 
 
 def train(
-    input_folder: str = "/home/s.chochi/denoiser/data/CC15",
+    input_folder: str = "/home/s.chochi/ai-works/denoiser/data/CC15",
     n_epochs: int = 5,
     folds: int = 5,
     model_string: Literal["lite", "base", "large"] = "lite",
@@ -107,7 +108,7 @@ def train(
             # Calculate PSNR
             model = fitter.model
             model.eval()
-            score = fn.psnr(model, test_dataloader)
+            score = fn.psnr(model, test_dataloader, device)
             print(f"FOLD {fold}: Mean PSNR {np.mean(score)}")
             results.append(score)
 
@@ -119,19 +120,57 @@ def train(
 
 
 def eval(
+    input_folder: str = "/home/s.chochi/ai-works/denoiser/data/CC15",
     model_string: Literal["lite", "base", "large"] = "lite",
+    model_path: str = "models/best-checkpoint.bin",
+    wandb_run_path: str | None = None,
+    batch_size: int = 4,
+    im_size: int | tuple[int, int] = 224,
+    output_folder: str = "inference_results",
 ):
+    """Run inference with a model trained on wandb.
+
+    Args:
+        input_folder: Path to the input images folder
+        model_string: Model type (lite, base, large)
+        model_path: Path to the local model file
+        wandb_run_path: Run path to download model from wandb (e.g., "entity/project/run_id")
+        batch_size: Batch size for inference
+        im_size: Image size
+        output_folder: Folder to save inference results
+    """
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = models.get_vit_unet(model_string)
-    model.load("models/best-checkpoint.bin")
+
+    # Download model from wandb
+    if wandb_run_path:
+        print(f"Downloading model from wandb: {wandb_run_path}")
+        api = wandb.Api()
+        run = api.run(wandb_run_path)
+        # Download model file
+        model_file = run.file("models/best-checkpoint.bin")
+        model_file.download(replace=True)
+        model_path = "models/best-checkpoint.bin"
+
+    # Load model
+    print(f"Loading model from {model_path}")
+    checkpoint = torch.load(model_path, map_location=device)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["model_state_dict"])
+    else:
+        model.load_state_dict(checkpoint)
     model.to(device)
+    model.eval()
+
+    # Prepare test data
+    test_files = np.array(sorted(Path(input_folder).glob("*real*")))
+    print(f"Found {len(test_files)} test images")
 
     test_dataloader = torch.utils.data.DataLoader(
         dataset.DenoisingDataset(
-            test,
+            test_files,
             clean_folder=input_folder,
             noisy_folder=input_folder,
-            # augments=test_transform,
             im_size=im_size,
         ),
         batch_size=batch_size,
@@ -139,30 +178,60 @@ def eval(
         num_workers=2,
     )
 
-    model.eval()
+    # Run inference
     results = []
+    psnr_scores = []
+    output_path = Path(output_folder)
+    output_path.mkdir(exist_ok=True, parents=True)
+
     with torch.no_grad():
-        for batch in test_dataloader:
+        for batch_idx, batch in enumerate(test_dataloader):
             x = batch["x"].to(device).float()
-            output = model(x)
             y = batch["y"]
-            results.append((x[0].cpu().numpy(), y[0].numpy(), output[0].cpu().numpy()))
+            output = model(x)
 
-    original = x[0].cpu().numpy().transpose(1, 2, 0)
-    clean = y[0].numpy().transpose(1, 2, 0)
-    reconstructed = output[0].cpu().numpy().transpose(1, 2, 0)
+            # Process each image in the batch
+            for i in range(x.shape[0]):
+                noisy_img = x[i].cpu().numpy().transpose(1, 2, 0)
+                clean_img = y[i].numpy().transpose(1, 2, 0)
+                denoised_img = output[i].cpu().numpy().transpose(1, 2, 0)
 
-    for a, b, c in results:
-        original = a.transpose(1, 2, 0)
-        clean = b.transpose(1, 2, 0)
-        reconstructed = c.transpose(1, 2, 0)
-        fig, ax = plt.subplots(1, 3, figsize=(10, 10))
+                # Calculate PSNR
+                psnr = peak_signal_noise_ratio(clean_img, denoised_img)
+                psnr_scores.append(psnr)
 
-        ax[0].imshow(original)
-        ax[1].imshow(clean)
-        ax[2].imshow(reconstructed)
-        plt.show()
+                results.append((noisy_img, clean_img, denoised_img, psnr))
+
+                # Save images
+                fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+                ax[0].imshow(np.clip(noisy_img, 0, 1))
+                ax[0].set_title("Noisy Input")
+                ax[0].axis("off")
+
+                ax[1].imshow(np.clip(clean_img, 0, 1))
+                ax[1].set_title("Ground Truth")
+                ax[1].axis("off")
+
+                ax[2].imshow(np.clip(denoised_img, 0, 1))
+                ax[2].set_title(f"Denoised (PSNR: {psnr:.2f})")
+                ax[2].axis("off")
+
+                plt.tight_layout()
+                plt.savefig(output_path / f"result_{batch_idx * batch_size + i:04d}.png")
+                plt.close()
+
+    # Display statistics
+    mean_psnr = np.mean(psnr_scores)
+    std_psnr = np.std(psnr_scores)
+    print("\nInference Results:")
+    print(f"Number of images processed: {len(results)}")
+    print(f"Mean PSNR: {mean_psnr:.2f} dB")
+    print(f"PSNR Std Dev: {std_psnr:.2f} dB")
+    print(f"Results saved to: {output_folder}")
+
+    return results, psnr_scores
 
 
 if __name__ == "__main__":
-    fire.Fire(train)
+    # fire.Fire(train)
+    fire.Fire(eval)
