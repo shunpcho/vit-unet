@@ -6,9 +6,9 @@ import numpy as np
 import torch
 import torchvision
 
-# 4: batch_size, c, h, w
+# 4: batch, channels, height, width
 IMAGE_DIMS = 4
-# 5: batch_size, n_patches, c, h, w
+# 5: batch, n_patches, channels, height, width
 PATCHED_IMAGE_DIMS = 5
 
 MINIMUM_PATCH_SIZE = 4
@@ -18,59 +18,63 @@ MINIMUM_PATCH_SIZE = 4
 def patch(x: torch.Tensor, patch_size: int) -> torch.Tensor:
     if len(x.size()) == PATCHED_IMAGE_DIMS:
         x = torch.squeeze(x, dim=1)
-    h, w = x.shape[-2], x.shape[-1]
-    assert h % patch_size == 0, "Patch size must divide images height"
-    assert w % patch_size == 0, "Patch size must divide images width"
+    height, width = x.shape[-2], x.shape[-1]
+    assert height % patch_size == 0, "Patch size must divide images height"
+    assert width % patch_size == 0, "Patch size must divide images width"
     patches = x.unfold(2, patch_size, patch_size).unfold(3, patch_size, patch_size)
     patch_list = torch.flatten(patches, 2, 3).permute(0, 2, 1, 3, 4)
     return patch_list
 
 
 def unflatten(flattened: torch.Tensor, num_channels: int) -> torch.Tensor:
-    # Alberto: Added to reconstruct from bs, n, projection_dim -> bs, n, c, h, w
-    bs, n, p = flattened.size()
+    # Alberto: Added to reconstruct from batch, n_patches, projection_dim -> batch, n_patches, channels, height, width
+    batch, n_patches, projection_dim = flattened.size()
     unflattened = torch.reshape(
-        flattened, (bs, n, num_channels, int(np.sqrt(p // num_channels)), int(np.sqrt(p // num_channels)))
+        flattened,
+        (
+            batch,
+            n_patches,
+            num_channels,
+            int(np.sqrt(projection_dim // num_channels)),
+            int(np.sqrt(projection_dim // num_channels)),
+        ),
     )
     return unflattened
 
 
 def unpatch(x: torch.Tensor, num_channels: int) -> torch.Tensor:
     if len(x.size()) < PATCHED_IMAGE_DIMS:
-        batch_size, num_patches, ch, h, w = unflatten(x, num_channels).size()
+        batch, n_patches, channels, height, width = unflatten(x, num_channels).size()
     else:
-        batch_size, num_patches, ch, h, w = x.size()
-    assert ch == num_channels, "Num. channels must agree"
-    elem_per_axis = int(np.sqrt(num_patches))
-    patches_middle = torch.stack(
-        [
-            torch.cat(list(x.reshape(batch_size, elem_per_axis, elem_per_axis, ch, h, w)[i]), dim=-2)
-            for i in range(batch_size)
-        ],
-        dim=0,
-    )
-    restored_images = torch.stack(
-        [torch.cat(list(patches_middle[i]), dim=-1) for i in range(batch_size)], dim=0
-    ).reshape(batch_size, 1, ch, h * elem_per_axis, w * elem_per_axis)
+        batch, n_patches, channels, height, width = x.size()
+    assert channels == num_channels, "Num. channels must agree"
+    elem_per_axis = int(np.sqrt(n_patches))
+
+    # Reshape patches to grid layout and reconstruct image (vectorized, no loops)
+    x_reshaped = x.reshape(batch, elem_per_axis, elem_per_axis, channels, height, width)
+    # Transpose to get correct spatial arrangement
+    x_transposed = x_reshaped.permute(0, 3, 1, 4, 2, 5)
+    # Merge spatial dimensions
+    restored_images = x_transposed.reshape(batch, 1, channels, height * elem_per_axis, width * elem_per_axis)
     return restored_images
 
 
 # Auxiliary methods to downsampling & upsampling
 def downsampling(encoded_patches: torch.Tensor, num_channels: int) -> torch.Tensor:
     _, _, embeddings = encoded_patches.size()
-    # ch, h, w = num_channels, int(np.sqrt(embeddings / num_channels)), int(np.sqrt(embeddings / num_channels))
-    h = int(np.sqrt(embeddings / num_channels))
+    # channels, height, width = num_channels, int(np.sqrt(embeddings / num_channels)), int(np.sqrt(embeddings / num_channels))
+    height = int(np.sqrt(embeddings / num_channels))
     original_image = unpatch(unflatten(encoded_patches, num_channels), num_channels)
-    new_patches = patch(original_image, patch_size=h // 2)
+    new_patches = patch(original_image, patch_size=height // 2)
     new_patches_flattened = torch.flatten(new_patches, start_dim=-3, end_dim=-1)
     return new_patches_flattened
 
 
 def upsampling(encoded_patches: torch.Tensor, num_channels: int) -> torch.Tensor:
     _, _, embeddings = encoded_patches.size()
-    h = int(np.sqrt(embeddings / num_channels))
+    height = int(np.sqrt(embeddings / num_channels))
     original_image = unpatch(unflatten(encoded_patches, num_channels), num_channels)
-    new_patches = patch(original_image, patch_size=h * 2)
+    new_patches = patch(original_image, patch_size=height * 2)
     new_patches_flattened = torch.flatten(new_patches, start_dim=-3, end_dim=-1)
     return new_patches_flattened
 
@@ -97,9 +101,8 @@ class PatchEncoder(torch.nn.Module):
         self.num_channels = num_channels
         self.projection_dim = projection_dim or self.num_channels * self.patch_size**2
         self.preprocessing = preprocessing
-        self.positions = torch.arange(
-            start=0, end=self.num_patches, step=1, device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        )
+        # Register positions as buffer so it moves with model to correct device
+        self.register_buffer("positions", torch.arange(start=0, end=self.num_patches, step=1))
 
         # Layers
         if self.preprocessing == "conv":
@@ -116,10 +119,8 @@ class PatchEncoder(torch.nn.Module):
             x = torch.fft.fft2(x).real  # pyright: ignore[reportUnknownVariableType]
         patches = patch(x, self.patch_size)  # pyright: ignore[reportUnknownArgumentType]
         flat_patches = torch.flatten(patches, -3, -1)
+        # Add positional encoding directly (removed redundant unpatch-patch cycle)
         encoded = flat_patches + self.position_embedding(self.positions)
-        encoded = torch.flatten(
-            patch(unpatch(unflatten(encoded, self.num_channels), self.num_channels), patch_size=self.patch_size), -3, -1
-        )
         return encoded
 
 
@@ -212,29 +213,44 @@ class ReAttention(torch.nn.Module):
         self.proj_drop = torch.nn.Dropout(proj_drop)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_num, n_patches, cannels = x.shape
+        batch, n_patches, projection_dim = x.shape
+
+        # Unflatten once for efficiency
+        x_unflat = unflatten(x, self.num_channels)  # (batch, n_patches, channels, height, width)
+        batch, n_patches, channels, height, width = x_unflat.shape
+
+        # Reshape to apply conv2d in batch: (batch*n_patches, channels, height, width)
+        x_conv_input = x_unflat.reshape(batch * n_patches, channels, height, width)
+
+        # Apply convolutions in batch (no loops)
+        q_conv = self.qconv2d(x_conv_input).reshape(batch, n_patches, channels, height, width)
+        k_conv = self.kconv2d(x_conv_input).reshape(batch, n_patches, channels, height, width)
+        v_conv = self.vconv2d(x_conv_input).reshape(batch, n_patches, channels, height, width)
+
+        # Flatten and reshape for attention
         q = (
-            torch.flatten(torch.stack([self.qconv2d(y) for y in unflatten(x, self.num_channels)], dim=0), -3, -1)
-            .reshape(batch_num, n_patches, 1, self.num_heads, cannels // self.num_heads)
-            .permute(2, 0, 3, 1, 4)[0]
+            torch.flatten(q_conv, -3, -1)
+            .reshape(batch, n_patches, self.num_heads, projection_dim // self.num_heads)
+            .transpose(1, 2)
         )
         k = (
-            torch.flatten(torch.stack([self.kconv2d(y) for y in unflatten(x, self.num_channels)], dim=0), -3, -1)
-            .reshape(batch_num, n_patches, 1, self.num_heads, cannels // self.num_heads)
-            .permute(2, 0, 3, 1, 4)[0]
+            torch.flatten(k_conv, -3, -1)
+            .reshape(batch, n_patches, self.num_heads, projection_dim // self.num_heads)
+            .transpose(1, 2)
         )
         v = (
-            torch.flatten(torch.stack([self.vconv2d(y) for y in unflatten(x, self.num_channels)], dim=0), -3, -1)
-            .reshape(batch_num, n_patches, 1, self.num_heads, cannels // self.num_heads)
-            .permute(2, 0, 3, 1, 4)[0]
+            torch.flatten(v_conv, -3, -1)
+            .reshape(batch, n_patches, self.num_heads, projection_dim // self.num_heads)
+            .transpose(1, 2)
         )
+
         attn = (torch.matmul(q, k.transpose(-2, -1))) * self.scale
         attn = torch.nn.functional.softmax(attn, dim=-1)
         attn = self.attn_drop(attn)
         if self.apply_transform:
             attn = self.var_norm(self.reatten_matrix(attn)) * self.reatten_scale
         attn_next = attn
-        x = (torch.matmul(attn, v)).transpose(1, 2).reshape(batch_num, n_patches, cannels)
+        x = torch.matmul(attn, v).transpose(1, 2).reshape(batch, n_patches, projection_dim)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x, attn_next
@@ -327,28 +343,47 @@ class SkipConnection(torch.nn.Module):
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         assert q.shape == k.shape
         assert k.shape == v.shape
-        batch_num, n_patches, cannels = q.shape
-        q = (
-            torch.flatten(torch.stack([self.qconv2d(y) for y in unflatten(q, self.num_channels)], dim=0), -3, -1)
-            .reshape(batch_num, n_patches, 1, self.num_heads, cannels // self.num_heads)
-            .permute(2, 0, 3, 1, 4)[0]
+        batch, n_patches, projection_dim = q.shape
+
+        # Unflatten all inputs once
+        q_unflat = unflatten(q, self.num_channels)  # (batch, n_patches, channels, height, width)
+        k_unflat = unflatten(k, self.num_channels)
+        v_unflat = unflatten(v, self.num_channels)
+        batch, n_patches, channels, height, width = q_unflat.shape
+
+        # Reshape to apply conv2d in batch: (batch*n_patches, channels, height, width)
+        q_conv_input = q_unflat.reshape(batch * n_patches, channels, height, width)
+        k_conv_input = k_unflat.reshape(batch * n_patches, channels, height, width)
+        v_conv_input = v_unflat.reshape(batch * n_patches, channels, height, width)
+
+        # Apply convolutions in batch (no loops)
+        q_conv = self.qconv2d(q_conv_input).reshape(batch, n_patches, channels, height, width)
+        k_conv = self.kconv2d(k_conv_input).reshape(batch, n_patches, channels, height, width)
+        v_conv = self.vconv2d(v_conv_input).reshape(batch, n_patches, channels, height, width)
+
+        # Flatten and reshape for attention
+        q_attn = (
+            torch.flatten(q_conv, -3, -1)
+            .reshape(batch, n_patches, self.num_heads, projection_dim // self.num_heads)
+            .transpose(1, 2)
         )
-        k = (
-            torch.flatten(torch.stack([self.kconv2d(y) for y in unflatten(k, self.num_channels)], dim=0), -3, -1)
-            .reshape(batch_num, n_patches, 1, self.num_heads, cannels // self.num_heads)
-            .permute(2, 0, 3, 1, 4)[0]
+        k_attn = (
+            torch.flatten(k_conv, -3, -1)
+            .reshape(batch, n_patches, self.num_heads, projection_dim // self.num_heads)
+            .transpose(1, 2)
         )
-        v = (
-            torch.flatten(torch.stack([self.vconv2d(y) for y in unflatten(v, self.num_channels)], dim=0), -3, -1)
-            .reshape(batch_num, n_patches, 1, self.num_heads, cannels // self.num_heads)
-            .permute(2, 0, 3, 1, 4)[0]
+        v_attn = (
+            torch.flatten(v_conv, -3, -1)
+            .reshape(batch, n_patches, self.num_heads, projection_dim // self.num_heads)
+            .transpose(1, 2)
         )
-        attn = (torch.matmul(q, k.transpose(-2, -1))) * self.scale
+
+        attn = (torch.matmul(q_attn, k_attn.transpose(-2, -1))) * self.scale
         attn = torch.nn.functional.softmax(attn, dim=-1)
         attn = self.attn_drop(attn)
         attn = self.var_norm(self.reatten_matrix(attn)) * self.reatten_scale
 
-        x = torch.matmul(attn, v).transpose(1, 2).reshape(batch_num, n_patches, cannels)
+        x = torch.matmul(attn, v_attn).transpose(1, 2).reshape(batch, n_patches, projection_dim)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -523,10 +558,10 @@ class ViTUNet(torch.nn.Module):
             raise ValueError(msg)
         return self.SkipConnections[(i + 1) // self.depth_te - 1](encoder_skip[skip_idx], x_patch, x_patch)
 
-    def _apply_final_processing(self, x_patch: torch.Tensor, batch_size: int, x: torch.Tensor) -> torch.Tensor:
+    def _apply_final_processing(self, x_patch: torch.Tensor, batch: int, x: torch.Tensor) -> torch.Tensor:
         """Apply final preprocessing and return result."""
         x_restored = unpatch(unflatten(x_patch, self.num_channels), self.num_channels).reshape(
-            batch_size, self.num_channels, self.im_size, self.im_size
+            batch, self.num_channels, self.im_size, self.im_size
         )
 
         if self.preprocessing == "conv":
@@ -567,7 +602,7 @@ class ViTUNet(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Previous validations
         x = torchvision.transforms.Resize(self.im_size)(x)
-        batch_size, _, _, _ = x.size()
+        batch, _, _, _ = x.size()
 
         # Preprocessing
         x_patch = self.PE(x)
@@ -585,4 +620,4 @@ class ViTUNet(torch.nn.Module):
         x_patch = self._decode_patches(x_patch, encoder_skip)
 
         # Final processing
-        return self._apply_final_processing(x_patch, batch_size, x)
+        return self._apply_final_processing(x_patch, batch, x)
