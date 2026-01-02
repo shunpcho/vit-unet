@@ -59,8 +59,8 @@ def unpatch(x: torch.Tensor, num_channels: int) -> torch.Tensor:
     x_reshaped = x.reshape(batch, elem_per_axis, elem_per_axis, channels, height, width)
     # Transpose to get correct spatial arrangement
     x_transposed = x_reshaped.permute(0, 3, 1, 4, 2, 5)
-    # Merge spatial dimensions
-    restored_images = x_transposed.reshape(batch, 1, channels, height * elem_per_axis, width * elem_per_axis)
+    # Merge spatial dimensions - fixed to return (batch, channels, H, W)
+    restored_images = x_transposed.reshape(batch, channels, height * elem_per_axis, width * elem_per_axis)
     return restored_images
 
 
@@ -137,9 +137,11 @@ class PatchEncoder(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.preprocessing == "conv":
             x = self.conv2d(x)
+
         elif self.preprocessing == "fourier":
-            x = torch.fft.fft2(x).real  # pyright: ignore[reportUnknownVariableType]
-        patches = patch(x, self.patch_size)  # pyright: ignore[reportUnknownArgumentType]
+            pass  # No preprocessing for fourier mode
+
+        patches = patch(x, self.patch_size)
         flat_patches = torch.flatten(patches, -3, -1)
         # Add positional encoding directly (removed redundant unpatch-patch cycle)
         encoded = flat_patches + self.position_embedding(self.positions)
@@ -670,22 +672,22 @@ class ViTUNet(torch.nn.Module):
             raise ValueError(msg)
         return self.SkipConnections[(i + 1) // self.depth_te - 1](encoder_skip[skip_idx], x_patch, x_patch)
 
-    def _apply_final_processing(self, x_patch: torch.Tensor, batch: int) -> torch.Tensor:
+    def _apply_final_processing(self, x_patch: torch.Tensor) -> torch.Tensor:
         """Apply final preprocessing and return result."""
-        x_restored = unpatch(unflatten(x_patch, self.num_channels), self.num_channels).reshape(
-            batch, self.num_channels, self.im_size, self.im_size
-        )
+        # unpatch already returns (batch, channels, H, W) - no need to reshape
+        x_restored = unpatch(unflatten(x_patch, self.num_channels), self.num_channels)
 
         if self.preprocessing == "conv":
             # Apply output convolution for feature refinement
             x_restored = self.output_conv2d(x_restored)
-        elif self.preprocessing == "fourier":
-            # Apply inverse FFT to the restored image, not the original input
-            x_restored_complex = torch.complex(x_restored, torch.zeros_like(x_restored))
-            x_restored = torch.fft.ifft2(x_restored_complex, norm="ortho").real  # pyright: ignore[reportUnknownVariableType]
+        # Note: Fourier mode doesn't need special output processing
+
+        # Clamp output to [0, 1] range for image denoising
+        # Using clamp instead of sigmoid to avoid saturation and detail loss
+        x_restored = torch.clamp(x_restored, 0.0, 1.0)
 
         self._log_final()
-        return x_restored  # pyright: ignore[reportUnknownVariableType]
+        return x_restored
 
     def _log_encoder_step(self, i: int, x_patch: torch.Tensor) -> None:
         """Log encoder step if verbose."""
@@ -717,7 +719,6 @@ class ViTUNet(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Previous validations
         x = torchvision.transforms.Resize(self.im_size)(x)
-        batch, _, _, _ = x.size()
 
         # Preprocessing
         x_patch = self.PE(x)
@@ -735,4 +736,4 @@ class ViTUNet(torch.nn.Module):
         x_patch = self._decode_patches(x_patch, encoder_skip)
 
         # Final processing
-        return self._apply_final_processing(x_patch, batch)
+        return self._apply_final_processing(x_patch)
