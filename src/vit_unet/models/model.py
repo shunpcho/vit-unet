@@ -628,7 +628,7 @@ class ViTUNet(torch.nn.Module):
     def _build_output(self) -> None:
         """Construct output layer."""
         if self.preprocessing == "conv":
-            self.conv2d = torch.nn.Conv2d(self.num_channels, self.num_channels, 3, padding="same")
+            self.output_conv2d = torch.nn.Conv2d(self.num_channels, self.num_channels, 3, padding="same")
 
     def _encode_patches(self, x_patch: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Process encoding layers and collect skip connections."""
@@ -670,16 +670,19 @@ class ViTUNet(torch.nn.Module):
             raise ValueError(msg)
         return self.SkipConnections[(i + 1) // self.depth_te - 1](encoder_skip[skip_idx], x_patch, x_patch)
 
-    def _apply_final_processing(self, x_patch: torch.Tensor, batch: int, x: torch.Tensor) -> torch.Tensor:
+    def _apply_final_processing(self, x_patch: torch.Tensor, batch: int) -> torch.Tensor:
         """Apply final preprocessing and return result."""
         x_restored = unpatch(unflatten(x_patch, self.num_channels), self.num_channels).reshape(
             batch, self.num_channels, self.im_size, self.im_size
         )
 
         if self.preprocessing == "conv":
-            x_restored = self.conv2d(x_restored)
+            # Apply output convolution for feature refinement
+            x_restored = self.output_conv2d(x_restored)
         elif self.preprocessing == "fourier":
-            x_restored = torch.fft.ifft2(x, norm="ortho").real  # pyright: ignore[reportUnknownVariableType]
+            # Apply inverse FFT to the restored image, not the original input
+            x_restored_complex = torch.complex(x_restored, torch.zeros_like(x_restored))
+            x_restored = torch.fft.ifft2(x_restored_complex, norm="ortho").real  # pyright: ignore[reportUnknownVariableType]
 
         self._log_final()
         return x_restored  # pyright: ignore[reportUnknownVariableType]
@@ -732,4 +735,4 @@ class ViTUNet(torch.nn.Module):
         x_patch = self._decode_patches(x_patch, encoder_skip)
 
         # Final processing
-        return self._apply_final_processing(x_patch, batch, x)
+        return self._apply_final_processing(x_patch, batch)
