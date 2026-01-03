@@ -629,8 +629,18 @@ class ViTUNet(torch.nn.Module):
 
     def _build_output(self) -> None:
         """Construct output layer."""
+        # Output layer predicts residual (correction) not absolute values
+        # This is better for denoising where output ≈ input
         if self.preprocessing == "conv":
-            self.output_conv2d = torch.nn.Conv2d(self.num_channels, self.num_channels, 3, padding="same")
+            self.output_conv2d = torch.nn.Sequential(
+                torch.nn.Conv2d(self.num_channels, self.num_channels, 3, padding="same"),
+                torch.nn.ReLU(inplace=True),
+                torch.nn.Conv2d(self.num_channels, self.num_channels, 1),
+                # No activation - predict residual (can be positive or negative)
+            )
+        else:
+            # For non-conv preprocessing, use a simple projection
+            self.output_projection = torch.nn.Conv2d(self.num_channels, self.num_channels, 1)
 
     def _encode_patches(self, x_patch: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Process encoding layers and collect skip connections."""
@@ -655,35 +665,52 @@ class ViTUNet(torch.nn.Module):
         for i, dec in enumerate(self.Decoders):
             x_patch = dec(x_patch)
             if (i + 1) % self.depth_te == 0:
+                # Upsample first, then apply skip connection
+                x_patch = upsampling(x_patch, self.num_channels)
+                # Skip connection replaces the current state (not added)
+                # The attention mechanism already combines encoder and decoder features
                 x_patch = self._apply_skip_connection(x_patch, encoder_skip, i)
                 self._log_decoder_step(i, x_patch)
         return x_patch
 
     def _apply_skip_connection(self, x_patch: torch.Tensor, encoder_skip: list[torch.Tensor], i: int) -> torch.Tensor:
-        """Apply upsampling and skip connection.
+        """Apply skip connection (upsampling is done before calling this method).
 
         Raises:
             ValueError: If encoder and decoder tensors have incompatible shapes.
         """
-        x_patch = upsampling(x_patch, self.num_channels)
         skip_idx = self.depth - ((i + 1) // self.depth_te)
         if encoder_skip[skip_idx].shape != x_patch.shape:
             msg = "enc and dec not same shape"
             raise ValueError(msg)
-        return self.SkipConnections[(i + 1) // self.depth_te - 1](encoder_skip[skip_idx], x_patch, x_patch)
+        # Use encoder_skip for both Q (query) and V (value) to properly integrate encoder features
+        # Q (query) from encoder, K (key) from decoder, V (value) from encoder
+        return self.SkipConnections[(i + 1) // self.depth_te - 1](
+            encoder_skip[skip_idx], x_patch, encoder_skip[skip_idx]
+        )
 
-    def _apply_final_processing(self, x_patch: torch.Tensor) -> torch.Tensor:
-        """Apply final preprocessing and return result."""
+    def _apply_final_processing(self, x_patch: torch.Tensor, x_input: torch.Tensor) -> torch.Tensor:
+        """Apply final preprocessing and return result.
+
+        Args:
+            x_patch: Decoded patches from the model
+            x_input: Original input image for residual connection
+        """
         # unpatch already returns (batch, channels, H, W) - no need to reshape
         x_restored = unpatch(unflatten(x_patch, self.num_channels), self.num_channels)
 
         if self.preprocessing == "conv":
-            # Apply output convolution for feature refinement
-            x_restored = self.output_conv2d(x_restored)
-        # Note: Fourier mode doesn't need special output processing
+            # Predict residual correction
+            residual = self.output_conv2d(x_restored)
+        else:
+            # Predict residual correction
+            residual = self.output_projection(x_restored)
 
-        # Clamp output to [0, 1] range for image denoising
-        # Using clamp instead of sigmoid to avoid saturation and detail loss
+        # Apply residual connection: output = input + correction
+        # Scale residual to keep changes small (better for training stability)
+        x_restored = x_input + 0.1 * residual
+
+        # Clamp to valid image range
         x_restored = torch.clamp(x_restored, 0.0, 1.0)
 
         self._log_final()
@@ -720,6 +747,9 @@ class ViTUNet(torch.nn.Module):
         # Previous validations
         x = torchvision.transforms.Resize(self.im_size)(x)
 
+        # Keep original input for residual connection
+        x_input = x
+
         # Preprocessing
         x_patch = self.PE(x)
         if self.verbose:
@@ -735,5 +765,5 @@ class ViTUNet(torch.nn.Module):
         # Decoding phase
         x_patch = self._decode_patches(x_patch, encoder_skip)
 
-        # Final processing
-        return self._apply_final_processing(x_patch)
+        # Final processing with residual connection
+        return self._apply_final_processing(x_patch, x_input)
