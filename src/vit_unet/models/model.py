@@ -642,6 +642,9 @@ class ViTUNet(torch.nn.Module):
             # For non-conv preprocessing, use a simple projection
             self.output_projection = torch.nn.Conv2d(self.num_channels, self.num_channels, 1)
 
+        # Learnable residual scaling factor (initialized to 0.1)
+        self.residual_scale = torch.nn.Parameter(torch.tensor(0.1))
+
     def _encode_patches(self, x_patch: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Process encoding layers and collect skip connections."""
         encoder_skip: list[torch.Tensor] = []
@@ -706,9 +709,9 @@ class ViTUNet(torch.nn.Module):
             # Predict residual correction
             residual = self.output_projection(x_restored)
 
-        # Apply residual connection: output = input + correction
-        # Scale residual to keep changes small (better for training stability)
-        x_restored = x_input + 0.1 * residual
+        # Apply residual connection with learnable scaling
+        # Scale is learned during training to match noise level
+        x_restored = x_input + self.residual_scale * residual
 
         # Clamp to valid image range
         x_restored = torch.clamp(x_restored, 0.0, 1.0)
