@@ -56,16 +56,18 @@ def downsampling(patches: torch.Tensor, num_channels: int) -> torch.Tensor:
 
 
 def upsampling(patches: torch.Tensor, num_channels: int) -> torch.Tensor:
-    """Increase spatial resolution by splitting patches."""
+    """Decrease spatial resolution by merging patches (inverse of downsampling)."""
     batch, num_patches, dim = patches.shape
-    patch_size = int(math.sqrt(dim // num_channels)) // 2
+    patch_size = int(math.sqrt(dim // num_channels))
     h = w = int(math.sqrt(num_patches))
 
-    # Split into 2x2 groups
-    x = patches.reshape(batch, h, w, num_channels, 2, patch_size, 2, patch_size)
-    x = x.permute(0, 1, 4, 2, 6, 3, 5, 7)
-    x = x.reshape(batch, h * 2, w * 2, num_channels, patch_size, patch_size)
-    x = x.reshape(batch, (h * 2) * (w * 2), num_channels * patch_size * patch_size)
+    # Merge 2x2 patch groups into single larger patches
+    # Input: h x w grid of patches, each patch_size x patch_size
+    # Output: h/2 x w/2 grid of patches, each 2*patch_size x 2*patch_size
+    x = patches.reshape(batch, h, w, num_channels, patch_size, patch_size)
+    x = x.reshape(batch, h // 2, 2, w // 2, 2, num_channels, patch_size, patch_size)
+    x = x.permute(0, 1, 3, 5, 2, 6, 4, 7)
+    x = x.reshape(batch, (h // 2) * (w // 2), num_channels * (2 * patch_size) * (2 * patch_size))
     return x
 
 
