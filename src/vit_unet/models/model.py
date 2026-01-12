@@ -494,6 +494,10 @@ class ViTUNet(nn.Module):
         if self.final_conv is not None:
             output = self.final_conv(output)
 
+        # Add residual connection
+        output = original_x + output
+        output = torch.sigmoid(output)
+
         return output
 
 
