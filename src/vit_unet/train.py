@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -9,11 +10,12 @@ import fire
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import wandb
+from dotenv import load_dotenv
 from skimage.metrics import peak_signal_noise_ratio  # pyright: ignore[reportUnknownVariableType]
 from sklearn.model_selection import KFold
 
 import vit_unet.models.functions as fn
-import wandb
 from vit_unet import dataset
 from vit_unet.models.build_model import get_vit_unet
 
@@ -30,8 +32,9 @@ def train(
     torch.random.manual_seed(42)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    WB_ENTITY = "kshuchi0203-hitachi"
-    wandb.login(key="556896069873c52312295f88d3f78b1d6e67e0a9")  # WANDB KEY
+    load_dotenv()
+    WB_ENTITY = os.getenv("WB_ENTITY")  # WandB entity name
+    wandb.login(key=os.getenv("WANDB_KEY"))  # WANDB KEY
     with wandb.init(project="ViT_UNet", entity=WB_ENTITY) as run:
         wandb.config.update({"n_epochs": n_epochs, "fold": folds, "model": model_string, "lr": lr})
 
